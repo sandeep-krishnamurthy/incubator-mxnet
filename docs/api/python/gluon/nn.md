@@ -22,7 +22,6 @@ This document lists the neural network blocks in Gluon:
     BatchNorm
     LeakyReLU
     Embedding
-    Flatten
 ```
 
 
