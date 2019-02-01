@@ -48,12 +48,19 @@ const char *kNamespaceSeparator = "$";
 
 
 DMLC_JSON_ENABLE_ANY(int, int);
+typedef std::map<std::string, std::vector<int>> map_str_int_vector;
+DMLC_JSON_ENABLE_ANY(map_str_int_vector, map);
 
 // convert nnvm symbol to a nnvm graph.
 nnvm::Graph Symbol2Graph(const nnvm::Symbol &s) {
   nnvm::Graph g;
   g.outputs = s.outputs;
   g.attrs["mxnet_version"] = std::make_shared<nnvm::any>(static_cast<int>(MXNET_VERSION));
+
+  std::map<std::string, std::vector<int>> inputs = {{"data0", {0,3,225,225}}, {"data1", {0,3,225,225}}};
+  std::map<std::string, std::vector<int>> outputs = {{"softmax_label", {0,10}}};
+  g.attrs["inputs"] = std::make_shared<nnvm::any>(inputs);
+  g.attrs["outputs"] = std::make_shared<nnvm::any>(outputs);
   return g;
 }
 
