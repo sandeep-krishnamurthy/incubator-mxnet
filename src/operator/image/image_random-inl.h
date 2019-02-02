@@ -159,42 +159,31 @@ inline bool NormalizeOpType(const nnvm::NodeAttrs& attrs,
   return out_attrs->at(0) != -1;
 }
 
-template<int req>
-struct normalize_forward {
-    template<typename DType>
-    MSHADOW_XINLINE static void Map(int j, DType* out_data, const DType* in_data,
-                                    const int i, const int length, const int step,
-                                    const DType mean, const DType std_dev) {
-        KERNEL_ASSIGN(out_data[step + i*length + j], req,
-                      (in_data[step + i*length + j] - mean) / std_dev);
-    }
-};
+#if MXNET_USE_CUDA
+template<typename DType, typename T>
+void NormalizeImplCUDA(Stream<gpu> *s,
+                      const T input,
+                      const T output,
+                      const NormalizeParam &param);
+#endif  // MXNET_USE_CUDA
 
-template<typename xpu>
-void NormalizeImpl(const OpContext &ctx,
-                          const std::vector<TBlob> &inputs,
+inline void NormalizeImpl(const std::vector<TBlob> &inputs,
                           const std::vector<TBlob> &outputs,
-                          const std::vector<OpReqType> &req,
                           const NormalizeParam &param,
                           const int length,
                           const uint32_t channel,
                           const int step = 0) {
-    mshadow::Stream<xpu> *s = ctx.get_stream<xpu>();
-
-    MSHADOW_TYPE_SWITCH(outputs[0].type_flag_, DType, {
-      MXNET_ASSIGN_REQ_SWITCH(req[0], req_type, {
-        DType* input = inputs[0].dptr<DType>();
-        DType* output = outputs[0].dptr<DType>();
-
-        for (uint32_t i = 0; i < channel; ++i) {
-            DType mean = param.mean[param.mean.ndim() > i ? i : 0];
-            DType std_dev = param.std[param.std.ndim() > i ? i : 0];
-            mxnet_op::Kernel<normalize_forward<req_type>, xpu>::Launch(
-                s, length, output, input,
-                i, length, step, mean, std_dev);
-        }
-      });
-    });
+  MSHADOW_TYPE_SWITCH(inputs[0].type_flag_, DType, {
+    DType* input = inputs[0].dptr<DType>();
+    DType* output = outputs[0].dptr<DType>();
+    for (uint32_t i = 0; i < channel; ++i) {
+      DType mean = param.mean[param.mean.ndim() > 1 ? i : 0];
+      DType std_dev = param.std[param.std.ndim() > 1 ? i : 0];
+      for (int j = 0; j < length; ++j) {
+        output[step + i*length + j] = (input[step + i*length + j] - mean) / std_dev;
+      }
+    }
+  });
 }
 
 template<typename xpu>
@@ -209,11 +198,28 @@ void NormalizeOpForward(const nnvm::NodeAttrs &attrs,
 
   const NormalizeParam &param = nnvm::get<NormalizeParam>(attrs.parsed);
 
-  // 3D input (c, h, w)
-  if (inputs[0].ndim() == 3) {
+  if (std::is_same<xpu, gpu>::value) {
+  #if MXNET_USE_CUDA
+    mshadow::Stream<gpu> *s = ctx.get_stream<gpu>();
+    MSHADOW_TYPE_SWITCH(inputs[0].type_flag_, DType, {
+      if (inputs[0].ndim() == 3) {
+        // 4D input (n, c, h, w)
+        Tensor<gpu, 3, DType> input = inputs[0].get<gpu, 3, DType>(s);
+        Tensor<gpu, 3, DType> output = outputs[0].get<gpu, 3, DType>(s);
+        NormalizeImplCUDA<DType, Tensor<gpu, 3, DType> >(s, input, output, param);
+      } else if (inputs[0].ndim() == 4) {
+        // 4D input (n, c, h, w)
+        Tensor<gpu, 4, DType> input = inputs[0].get<gpu, 4, DType>(s);
+        Tensor<gpu, 4, DType> output = outputs[0].get<gpu, 4, DType>(s);
+        NormalizeImplCUDA<DType, Tensor<gpu, 4, DType> >(s, input, output, param);
+      }
+    });
+  #endif // MXNET_USE_CUDA
+  } else if (inputs[0].ndim() == 3) {
+    // 3D input (c, h, w)
     const int length = inputs[0].shape_[1] * inputs[0].shape_[2];
     const uint32_t channel = inputs[0].shape_[0];
-    NormalizeImpl<xpu>(ctx, inputs, outputs, req, param, length, channel);
+    NormalizeImpl(inputs, outputs, param, length, channel);
   } else if (inputs[0].ndim() == 4) {
     // 4D input (n, c, h, w)
     const int batch_size = inputs[0].shape_[0];
@@ -223,7 +229,7 @@ void NormalizeOpForward(const nnvm::NodeAttrs &attrs,
 
     #pragma omp parallel for
     for (auto n = 0; n < batch_size; ++n) {
-      NormalizeImpl<xpu>(ctx, inputs, outputs, req, param, length, channel, n*step);
+      NormalizeImpl(inputs, outputs, param, length, channel, n*step);
     }
   }
 }
